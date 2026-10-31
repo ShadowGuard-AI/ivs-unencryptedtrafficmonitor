@@ -2,6 +2,7 @@ import argparse
 import logging
 import socket
 import struct
+import sys
 import pcapy
 from scapy.all import *
 
@@ -21,15 +22,33 @@ def setup_argparse():
                         help='Path to the log file (default: ivs-UnencryptedTrafficMonitor.log)')
     return parser.parse_args()
 
+WELL_KNOWN_PORTS = {'http': 80, 'ftp': 21, 'telnet': 23}
+
 def is_protocol_present(payload, protocol):
     """Checks if the specified protocol is present in the payload (case-insensitive)."""
     try:
-        payload_str = payload.decode('utf-8', errors='ignore').lower() # Attempt to decode as UTF-8
+        payload_str = payload.decode('utf-8', errors='ignore').lower()
         return protocol in payload_str
     except UnicodeDecodeError:
-        # Log the error and return False.  Some payloads might not be decodable.
         logging.debug(f"UnicodeDecodeError decoding payload, skipping {protocol} check.")
         return False
+
+def detect_unencrypted_protocol(sport, dport, payload):
+    """Return the plaintext protocol for a packet, or None.
+
+    Detection is port aware. Traffic on a protocol's standard port
+    (80 for HTTP, 21 for FTP, 23 for Telnet) with a payload is that
+    protocol's plaintext traffic, whether or not the payload spells
+    the protocol name. A payload signature also counts, but only on
+    that protocol's standard port: a bare protocol word on an
+    unrelated port is not a finding.
+    """
+    if not payload:
+        return None
+    for protocol, port in WELL_KNOWN_PORTS.items():
+        if sport == port or dport == port:
+            return protocol
+    return None
 
 def process_packet(packet, interface):
     """Processes each captured packet to detect unencrypted protocols."""
@@ -47,13 +66,12 @@ def process_packet(packet, interface):
                 tcp_header = transport_layer
                 payload = tcp_header.payload.original
 
-                if payload:  # Only process packets with a payload
-                    for protocol in PROTOCOLS_TO_MONITOR:
-                        if is_protocol_present(payload, protocol):
-                            logging.warning(f"Unencrypted {protocol.upper()} traffic detected on interface {interface}: "
-                                             f"Source IP: {ip_header.src}, Port: {tcp_header.sport} -> "
-                                             f"Destination IP: {ip_header.dst}, Port: {tcp_header.dport}")
-                            break # Only report once per packet
+                if payload:
+                    protocol = detect_unencrypted_protocol(tcp_header.sport, tcp_header.dport, payload)
+                    if protocol:
+                        logging.warning(f"Unencrypted {protocol.upper()} traffic detected on interface {interface}: "
+                                         f"Source IP: {ip_header.src}, Port: {tcp_header.sport} -> "
+                                         f"Destination IP: {ip_header.dst}, Port: {tcp_header.dport}")
         elif ethernet_header.type == 0x86DD: # IPv6
             ip_header = ethernet_header[IPv6]
             transport_layer = ip_header.payload
@@ -63,13 +81,12 @@ def process_packet(packet, interface):
                 tcp_header = transport_layer
                 payload = tcp_header.payload.original
 
-                if payload:  # Only process packets with a payload
-                    for protocol in PROTOCOLS_TO_MONITOR:
-                        if is_protocol_present(payload, protocol):
-                            logging.warning(f"Unencrypted {protocol.upper()} traffic detected on interface {interface}: "
-                                             f"Source IP: {ip_header.src}, Port: {tcp_header.sport} -> "
-                                             f"Destination IP: {ip_header.dst}, Port: {tcp_header.dport}")
-                            break # Only report once per packet
+                if payload:
+                    protocol = detect_unencrypted_protocol(tcp_header.sport, tcp_header.dport, payload)
+                    if protocol:
+                        logging.warning(f"Unencrypted {protocol.upper()} traffic detected on interface {interface}: "
+                                         f"Source IP: {ip_header.src}, Port: {tcp_header.sport} -> "
+                                         f"Destination IP: {ip_header.dst}, Port: {tcp_header.dport}")
 
 
     except Exception as e:
@@ -96,10 +113,13 @@ def main():
 
     except pcapy.PcapError as e:
         logging.error(f"PcapError: {e}.  Ensure you have permission to access the network interface.")
+        sys.exit(1)
     except socket.error as e:
         logging.error(f"Socket error: {e}.  Ensure the interface '{interface}' exists and you have permission to access it.")
+        sys.exit(1)
     except Exception as e:
         logging.error(f"An unexpected error occurred: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
