@@ -24,6 +24,12 @@ def setup_argparse():
 
 WELL_KNOWN_PORTS = {'http': 80, 'ftp': 21, 'telnet': 23}
 
+# This helper is never called. Detection below is decided by port
+# alone; the payload only has to be non-empty. A payload that spells a
+# protocol name on an unrelated port is not a finding, and traffic on
+# a standard port is reported as that port's protocol whatever its
+# bytes say. The docstring on detect_unencrypted_protocol describes a
+# signature test this code does not perform.
 def is_protocol_present(payload, protocol):
     """Checks if the specified protocol is present in the payload (case-insensitive)."""
     try:
@@ -45,6 +51,9 @@ def detect_unencrypted_protocol(sport, dport, payload):
     """
     if not payload:
         return None
+    # One packet can match two rows here, a connection from port 80 to
+    # port 23 for instance. Dict order decides, so it is reported as the
+    # first matching protocol in the table and the second is never named.
     for protocol, port in WELL_KNOWN_PORTS.items():
         if sport == port or dport == port:
             return protocol
@@ -57,6 +66,10 @@ def process_packet(packet, interface):
         ethernet_header = Ether(packet)
 
         # Check for IP packets (IPv4 or IPv6)
+        # The IPv4 and IPv6 blocks below are the same logic written twice.
+        # Only TCP is examined in either: plaintext protocols running over UDP
+        # are invisible to this monitor, and so is anything not carried in an
+        # Ethernet frame scapy can dissect this way.
         if ethernet_header.type == 0x0800:  # IPv4
             ip_header = ethernet_header[IP]
             transport_layer = ip_header.payload
@@ -108,6 +121,11 @@ def main():
 
     try:
         # Capture packets indefinitely
+        # sniff runs until the process is stopped; there is no count or
+        # timeout option. store=0 keeps no packet history in memory, which is
+        # what makes an indefinite capture survivable. Each packet is turned
+        # back into raw bytes and redissected by Ether inside process_packet,
+        # so scapy parses it twice.
         sniff(iface=interface, prn=lambda pkt: process_packet(raw(pkt), interface), store=0)
 
 
